@@ -5,13 +5,18 @@ While connected to a MAVSTART network, it probes the Windows connectivity-test U
 When the captive portal intercepts it, the portal's "accept terms" form is submitted
 directly (the same POST the "Csatlakozas a halozathoz" button sends).
 
+Settings come from mav-wifi.config.json next to this script and are reloaded when the file
+changes. -NetworkPattern and -IntervalSeconds override them for one run.
+
   .\mav-wifi-connector.ps1          # run continuously
   .\mav-wifi-connector.ps1 -Once    # single check, for testing
+  .\mav-wifi-connector.ps1 -Manual  # run even when Autostart is off (used by "mav-wifi start")
 #>
 param(
-    [string]$NetworkPattern = '^MAVSTART',
-    [int]$IntervalSeconds = 5,
-    [switch]$Once
+    [string]$NetworkPattern,
+    [int]$IntervalSeconds,
+    [switch]$Once,
+    [switch]$Manual
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +27,7 @@ $ProbeBody       = 'Microsoft Connect Test'
 $DefaultLoginUrl = 'https://virtual-ip.instant.telekom.hu/login.html'
 $RedirectUrl     = 'https://www.telekom.hu/vallalati-megoldasok/sztenderd-szolgaltatasok'
 $LogFile         = Join-Path $PSScriptRoot 'mav-wifi-connector.log'
+$ConfigFile      = Join-Path $PSScriptRoot 'mav-wifi.config.json'
 
 function Write-Log([string]$Message) {
     $line = '{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $Message
@@ -50,7 +56,27 @@ function Show-Notification([string]$Title, [string]$Text) {
 
 function Test-OnMavNetwork {
     [bool](Get-NetConnectionProfile -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $NetworkPattern })
+        Where-Object { $_.Name -match $Config.NetworkPattern })
+}
+
+function Read-Config {
+    $config = [ordered]@{ IntervalSeconds = 5; NetworkPattern = '^MAVSTART'; Autostart = $true }
+    if (Test-Path $ConfigFile) {
+        try {
+            (Get-Content $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
+                Where-Object { $config.Contains($_.Name) } | ForEach-Object { $config[$_.Name] = $_.Value }
+        } catch {
+            Write-Log "Ignoring ${ConfigFile}: $($_.Exception.Message)"
+        }
+    }
+    if ($NetworkPattern) { $config.NetworkPattern = $NetworkPattern }
+    if ($IntervalSeconds -gt 0) { $config.IntervalSeconds = $IntervalSeconds }
+    if ([int]$config.IntervalSeconds -lt 1) { $config.IntervalSeconds = 5 }
+    $config
+}
+
+function Get-ConfigStamp {
+    if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc.Ticks } else { 0 }
 }
 
 function Invoke-Http {
@@ -134,6 +160,13 @@ function Submit-Login($Portal) {
     $false
 }
 
+$configStamp = Get-ConfigStamp
+$Config = Read-Config
+if (-not $Config.Autostart -and -not ($Once -or $Manual)) {
+    Write-Log 'Not starting at logon: autostart is off ("mav-wifi autostart on" turns it back on).'
+    return
+}
+
 $mutex = New-Object Threading.Mutex($false, 'Local\mav-wifi-connector')
 if (-not $mutex.WaitOne(0)) {
     Write-Host 'Already running.'
@@ -143,9 +176,15 @@ if (-not $mutex.WaitOne(0)) {
 Register-ObjectEvent -InputObject ([Net.NetworkInformation.NetworkChange]) -EventName NetworkAddressChanged `
     -SourceIdentifier NetChange | Out-Null
 
-Write-Log "Started (network '$NetworkPattern', on network change or every $IntervalSeconds s)"
+Write-Log "Started (network '$($Config.NetworkPattern)', on network change or every $($Config.IntervalSeconds) s)"
 $lastState = ''
 while ($true) {
+    $stamp = Get-ConfigStamp
+    if ($stamp -ne $configStamp) {
+        $configStamp = $stamp
+        $Config = Read-Config
+        Write-Log "Config reloaded (network '$($Config.NetworkPattern)', every $($Config.IntervalSeconds) s)"
+    }
     $state = 'NotOnMav'
     if (Test-OnMavNetwork) {
         $portal = Get-PortalState
@@ -164,7 +203,7 @@ while ($true) {
         $lastState = $state
     }
     if ($Once) { break }
-    if (Wait-Event -SourceIdentifier NetChange -Timeout $IntervalSeconds) {
+    if (Wait-Event -SourceIdentifier NetChange -Timeout $Config.IntervalSeconds) {
         Start-Sleep -Seconds 1
         Get-Event -SourceIdentifier NetChange -ErrorAction SilentlyContinue | Remove-Event
     }
