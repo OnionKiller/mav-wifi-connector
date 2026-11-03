@@ -2,18 +2,20 @@
 
 A small Windows background tool that keeps you logged in to the MÁV (Hungarian railway) on-board Wi-Fi.
 
-The train's Wi-Fi equipment restarts often, and after every restart the Telekom captive portal blocks traffic again until you find the login page and click **"Csatlakozás a hálózathoz"**. This tool notices that and accepts the portal for you, then shows a Windows notification.
+The train's Wi-Fi equipment restarts often, and after every restart the captive portal blocks traffic again until you find the login page and click **"Csatlakozás a hálózathoz"** (Telekom portal) or **"Elfogadás és csatlakozás"** (Passengera portal). This tool notices that and accepts the portal for you, then shows a Windows notification.
 
 ## How it works
 
 1. It checks whether you are connected to a `MAVSTART…` network. On any other network it does nothing.
 2. On a MAV network it requests `http://www.msftconnecttest.com/connecttest.txt`, the same URL Windows uses to check internet access.
-3. If the portal intercepts that request, the tool sends the portal's accept-terms form (`buttonClicked=4`, `hfelt=1`) directly to the login URL (`https://virtual-ip.instant.telekom.hu/login.html` by default, or the `switch_url` taken from the portal redirect). No browser is involved.
+3. If a portal intercepts that request, the tool accepts its terms directly. No browser is involved. It handles two kinds of portal:
+   - **Telekom** (`instant.telekom.hu`): used when the redirect carries a `switch_url`, and as the fallback. The tool sends the accept-terms form (`buttonClicked=4`, `hfelt=1`) to that `switch_url`, or to `https://virtual-ip.instant.telekom.hu/login.html` when there is none.
+   - **Passengera** (`portal.passengera.com`, the "Üdvözöljük! / Elfogadás és csatlakozás" page): used when the portal answers `/api/config`. The tool makes the same API calls as the **"Elfogadás és csatlakozás"** button: `POST /api/users/register`, then `POST /api/users` with the terms-only bundle from `/api/config` (normally `{"category":"internet","bundleId":"default"}`).
 4. It checks again, logs the result, and shows a "back online" notification.
 
 Checks run as soon as Windows reports a network change, and every 5 seconds as a fallback (for example when the portal session expires without the Wi-Fi dropping). The interval is configurable, see [Configuration](#configuration).
 
-By running the tool you accept the portal's [terms of use](https://mav-fedelzet.instant.telekom.hu/szolgaltatasi_feltetelek.php) every time it logs you in.
+By running the tool you accept the portal's terms of use every time it logs you in ([Telekom](https://mav-fedelzet.instant.telekom.hu/szolgaltatasi_feltetelek.php), or the "Felhasználási feltételek" linked on the Passengera page).
 
 ## Requirements
 
@@ -95,11 +97,13 @@ Get-Content .\mav-wifi-connector.log -Tail 20 -Wait
 A successful automatic login looks like this:
 
 ```
-2026-10-14 19:10:41  Captive portal detected, accepting via https://virtual-ip.instant.telekom.hu/login.html
+2026-10-14 19:10:41  Captive portal detected (Telekom), accepting via https://virtual-ip.instant.telekom.hu/login.html
 2026-10-14 19:10:46  Logged in.
+2026-11-03 08:50:12  Captive portal detected (Passengera), accepting via https://portal.passengera.com/api/users
+2026-11-03 08:50:15  Logged in.
 ```
 
-If the log shows `Still captive after login`, the line includes the portal's response, which helps when adjusting the form fields.
+If the log shows `Still captive after login`, the line includes the portal's response, which helps when adjusting the form fields. On a Passengera train, `https://portal.passengera.com/api/users` shows your session (`"category":"internet"` means logged in, plus expiry and data usage).
 
 ## Running manually
 

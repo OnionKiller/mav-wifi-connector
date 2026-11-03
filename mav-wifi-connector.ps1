@@ -2,8 +2,10 @@
 Keeps the MAV on-board Wi-Fi logged in.
 
 While connected to a MAVSTART network, it probes the Windows connectivity-test URL.
-When the captive portal intercepts it, the portal's "accept terms" form is submitted
-directly (the same POST the "Csatlakozas a halozathoz" button sends).
+When the captive portal intercepts it, the portal's "accept terms" step is sent directly:
+  - Telekom portal: the form POST the "Csatlakozas a halozathoz" button sends.
+  - Passengera portal (portal.passengera.com): the API calls the "Elfogadas es csatlakozas"
+    ("Accept and connect") button makes.
 
 Settings come from mav-wifi.config.json next to this script and are reloaded when the file
 changes. -NetworkPattern and -IntervalSeconds override them for one run.
@@ -26,6 +28,7 @@ $ProbeUrl        = 'http://www.msftconnecttest.com/connecttest.txt'
 $ProbeBody       = 'Microsoft Connect Test'
 $DefaultLoginUrl = 'https://virtual-ip.instant.telekom.hu/login.html'
 $RedirectUrl     = 'https://www.telekom.hu/vallalati-megoldasok/sztenderd-szolgaltatasok'
+$PassengeraUrl   = 'https://portal.passengera.com'
 $LogFile         = Join-Path $PSScriptRoot 'mav-wifi-connector.log'
 $ConfigFile      = Join-Path $PSScriptRoot 'mav-wifi.config.json'
 
@@ -80,18 +83,21 @@ function Get-ConfigStamp {
 }
 
 function Invoke-Http {
-    param([string]$Url, [string]$Method = 'GET', [string]$Body, [string]$Referer)
+    param(
+        [string]$Url, [string]$Method = 'GET', [string]$Body, [string]$Referer,
+        [string]$ContentType = 'application/x-www-form-urlencoded', [switch]$FollowRedirects
+    )
 
     $req = [Net.HttpWebRequest]::Create($Url)
     $req.Method = $Method
-    $req.AllowAutoRedirect = $false
+    $req.AllowAutoRedirect = [bool]$FollowRedirects
     $req.Timeout = 8000
     $req.ReadWriteTimeout = 8000
     $req.UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     if ($Referer) { $req.Referer = $Referer }
     if ($Body) {
-        $bytes = [Text.Encoding]::ASCII.GetBytes($Body)
-        $req.ContentType = 'application/x-www-form-urlencoded'
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+        $req.ContentType = $ContentType
         $req.ContentLength = $bytes.Length
         $stream = $req.GetRequestStream()
         $stream.Write($bytes, 0, $bytes.Length)
@@ -109,9 +115,10 @@ function Invoke-Http {
     try {
         $reader = New-Object IO.StreamReader($resp.GetResponseStream())
         [pscustomobject]@{
-            Status   = [int]$resp.StatusCode
-            Location = $resp.Headers['Location']
-            Body     = $reader.ReadToEnd()
+            Status      = [int]$resp.StatusCode
+            Location    = $resp.Headers['Location']
+            ResponseUri = $resp.ResponseUri
+            Body        = $reader.ReadToEnd()
         }
     } finally {
         $resp.Close()
@@ -120,6 +127,26 @@ function Invoke-Http {
 
 function Find-SwitchUrl([string]$Text) {
     if ($Text -match 'switch_url=([^&"''\s<>]+)') { return [Uri]::UnescapeDataString($Matches[1]) }
+}
+
+function Find-BodyRedirect([string]$Text) {
+    if ($Text -match '(?i)(?:url=|location(?:\.href)?\s*=\s*|location\.(?:replace|assign)\(\s*)[''"]?(https?://[^''"\s<>)]+)') {
+        return $Matches[1]
+    }
+}
+
+function Get-PassengeraPortal([string]$Url) {
+    try {
+        $origin = ([Uri]$Url).GetLeftPart([UriPartial]::Authority)
+        $r = Invoke-Http "$origin/api/config" -FollowRedirects
+        if ($r.Status -ne 200) { return }
+        $config = $r.Body | ConvertFrom-Json
+        if (-not $config.bundles) { return }
+        [pscustomobject]@{
+            Origin = $r.ResponseUri.GetLeftPart([UriPartial]::Authority)
+            Config = $config
+        }
+    } catch {}
 }
 
 function Get-PortalState {
@@ -133,23 +160,68 @@ function Get-PortalState {
     }
 
     $portalUrl = $r.Location
+    if (-not $portalUrl) { $portalUrl = Find-BodyRedirect $r.Body }
     $loginUrl = Find-SwitchUrl "$($r.Location) $($r.Body)"
     if (-not $loginUrl -and $portalUrl) {
         try { $loginUrl = Find-SwitchUrl (Invoke-Http $portalUrl).Body } catch {}
     }
-    if (-not $loginUrl) { $loginUrl = $DefaultLoginUrl }
+    if ($loginUrl) {
+        return [pscustomobject]@{ State = 'Captive'; Kind = 'Telekom'; LoginUrl = $loginUrl; PortalUrl = $portalUrl }
+    }
 
-    [pscustomobject]@{ State = 'Captive'; LoginUrl = $loginUrl; PortalUrl = $portalUrl }
+    foreach ($url in @($portalUrl, $PassengeraUrl) | Where-Object { $_ } | Select-Object -Unique) {
+        $passengera = Get-PassengeraPortal $url
+        if ($passengera) {
+            return [pscustomobject]@{
+                State     = 'Captive'
+                Kind      = 'Passengera'
+                LoginUrl  = "$($passengera.Origin)/api/users"
+                PortalUrl = "$($passengera.Origin)/"
+                Origin    = $passengera.Origin
+                Config    = $passengera.Config
+            }
+        }
+    }
+
+    [pscustomobject]@{ State = 'Captive'; Kind = 'Telekom'; LoginUrl = $DefaultLoginUrl; PortalUrl = $portalUrl }
+}
+
+function Submit-TelekomLogin($Portal) {
+    $body = 'buttonClicked=4&err_flag=0&redirect_url=' + [Uri]::EscapeDataString($RedirectUrl) + '&hfelt=1'
+    Invoke-Http -Url $Portal.LoginUrl -Method POST -Body $body -Referer $Portal.PortalUrl
+}
+
+function Submit-PassengeraLogin($Portal) {
+    $bundles = @($Portal.Config.bundles | Where-Object {
+        $_.category -and -not (@($_.requirements) | Where-Object { $_ -ne 'terms' })
+    })
+    $bundle = @($bundles | Where-Object { $_.id -eq 'default' }) + $bundles | Select-Object -First 1
+    if (-not $bundle) {
+        Write-Log "Passengera portal offers no terms-only bundle: $($Portal.Config.bundles | ConvertTo-Json -Compress -Depth 5)"
+        return
+    }
+
+    $register = [ordered]@{ indentityProvider = 'direct'; firstName = ''; lastName = ''; phone = ''; email = '' }
+    try {
+        $null = Invoke-Http -Url "$($Portal.Origin)/api/users/register" -Method POST -ContentType 'application/json' `
+            -Body ($register | ConvertTo-Json -Compress) -Referer $Portal.PortalUrl
+    } catch {
+        Write-Log "Passengera register request failed: $($_.Exception.Message)"
+    }
+
+    $signIn = [ordered]@{ category = $bundle.category; bundleId = $bundle.id }
+    Invoke-Http -Url $Portal.LoginUrl -Method POST -ContentType 'application/json' `
+        -Body ($signIn | ConvertTo-Json -Compress) -Referer $Portal.PortalUrl
 }
 
 function Submit-Login($Portal) {
-    $body = 'buttonClicked=4&err_flag=0&redirect_url=' + [Uri]::EscapeDataString($RedirectUrl) + '&hfelt=1'
     try {
-        $r = Invoke-Http -Url $Portal.LoginUrl -Method POST -Body $body -Referer $Portal.PortalUrl
+        $r = if ($Portal.Kind -eq 'Passengera') { Submit-PassengeraLogin $Portal } else { Submit-TelekomLogin $Portal }
     } catch {
         Write-Log "Login request failed: $($_.Exception.Message)"
         return $false
     }
+    if (-not $r) { return $false }
 
     Start-Sleep -Seconds 2
     if ((Get-PortalState).State -eq 'Online') { return $true }
@@ -190,7 +262,7 @@ while ($true) {
         $portal = Get-PortalState
         $state = $portal.State
         if ($state -eq 'Captive') {
-            Write-Log "Captive portal detected, accepting via $($portal.LoginUrl)"
+            Write-Log "Captive portal detected ($($portal.Kind)), accepting via $($portal.LoginUrl)"
             if (Submit-Login $portal) {
                 Write-Log 'Logged in.'
                 Show-Notification 'MAV WiFi' 'Captive portal accepted automatically - you are back online.'
