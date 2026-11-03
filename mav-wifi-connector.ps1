@@ -85,14 +85,15 @@ function Get-ConfigStamp {
 function Invoke-Http {
     param(
         [string]$Url, [string]$Method = 'GET', [string]$Body, [string]$Referer,
-        [string]$ContentType = 'application/x-www-form-urlencoded', [switch]$FollowRedirects
+        [string]$ContentType = 'application/x-www-form-urlencoded', [switch]$FollowRedirects,
+        [int]$TimeoutMs = 8000
     )
 
     $req = [Net.HttpWebRequest]::Create($Url)
     $req.Method = $Method
     $req.AllowAutoRedirect = [bool]$FollowRedirects
-    $req.Timeout = 8000
-    $req.ReadWriteTimeout = 8000
+    $req.Timeout = $TimeoutMs
+    $req.ReadWriteTimeout = $TimeoutMs
     $req.UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     if ($Referer) { $req.Referer = $Referer }
     if ($Body) {
@@ -130,7 +131,7 @@ function Find-SwitchUrl([string]$Text) {
 }
 
 function Find-BodyRedirect([string]$Text) {
-    if ($Text -match '(?i)(?:url=|location(?:\.href)?\s*=\s*|location\.(?:replace|assign)\(\s*)[''"]?(https?://[^''"\s<>)]+)') {
+    if ($Text -match '(?i)(?<![\w-])(?:url=|location(?:\.href)?\s*=\s*|location\.(?:replace|assign)\(\s*)[''"]?(https?://[^''"\s<>)]+)') {
         return $Matches[1]
     }
 }
@@ -138,7 +139,7 @@ function Find-BodyRedirect([string]$Text) {
 function Get-PassengeraPortal([string]$Url) {
     try {
         $origin = ([Uri]$Url).GetLeftPart([UriPartial]::Authority)
-        $r = Invoke-Http "$origin/api/config" -FollowRedirects
+        $r = Invoke-Http "$origin/api/config" -FollowRedirects -TimeoutMs 3000
         if ($r.Status -ne 200) { return }
         $config = $r.Body | ConvertFrom-Json
         if (-not $config.bundles) { return }
@@ -169,7 +170,11 @@ function Get-PortalState {
         return [pscustomobject]@{ State = 'Captive'; Kind = 'Telekom'; LoginUrl = $loginUrl; PortalUrl = $portalUrl }
     }
 
-    foreach ($url in @($portalUrl, $PassengeraUrl) | Where-Object { $_ } | Select-Object -Unique) {
+    $passengeraCandidates = @()
+    if ($portalUrl -notmatch '^https?://[^/?#]*\btelekom\.hu(?:[:/?#]|$)') {
+        $passengeraCandidates = @($portalUrl, $PassengeraUrl) | Where-Object { $_ } | Select-Object -Unique
+    }
+    foreach ($url in $passengeraCandidates) {
         $passengera = Get-PassengeraPortal $url
         if ($passengera) {
             return [pscustomobject]@{
