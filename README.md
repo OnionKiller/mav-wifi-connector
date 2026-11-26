@@ -28,7 +28,7 @@ By running the tool you accept the portal's terms of use every time it logs you 
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-This registers a per-user scheduled task, **MAV WiFi Connector**, that starts hidden at every logon, and starts it right away. The task runs the script from this folder, so keep the folder where it is.
+This registers a per-user scheduled task, **MAV WiFi Connector**, that starts at every logon, and starts it right away. The connector always runs in the background through a headless console (`conhost.exe --headless`), so no window ever appears. The task runs the script from this folder, so keep the folder where it is.
 
 It also sets up the `mav-wifi` command:
 
@@ -48,8 +48,7 @@ This removes the task, the `PATH` entry and the profile line.
 ## The mav-wifi command
 
 ```powershell
-mav-wifi start                      # start it now
-mav-wifi start -NoConsole           # start it now directly, with no console window at all
+mav-wifi start                      # start it now, in the background with no window
 mav-wifi stop                       # stop it now (it starts again at the next logon unless autostart is off)
 mav-wifi status                     # running?, starts at logon?, check interval, network pattern
 mav-wifi log                        # show the last 20 log lines
@@ -62,7 +61,7 @@ mav-wifi config IntervalSeconds 30  # change a setting
 
 In PowerShell, press Tab after `mav-wifi ` to cycle through the commands, setting names and values, or Ctrl+Space to see them all with descriptions. `Get-Help mav-wifi` describes every command, and `Get-Help mav-wifi -Examples` lists examples.
 
-`mav-wifi start` goes through the scheduled task. With `-NoConsole`, when autostart is off, or when the task isn't installed, it runs the connector directly in a headless console (`conhost.exe --headless`) instead.
+`mav-wifi start` runs the connector directly in a headless console (`conhost.exe --headless`), so it works even when autostart is off or the task isn't installed.
 
 The PowerShell `mav-wifi` function is loaded from `mav-wifi.ps1` when the terminal starts, so after editing that script, open a new terminal to pick up the change.
 

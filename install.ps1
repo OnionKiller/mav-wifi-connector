@@ -26,12 +26,18 @@ if (-not (Select-String -Path $PROFILE -SimpleMatch $profileLine -Quiet)) {
 Write-Host 'Open a new terminal to use the mav-wifi command.'
 if ($CommandOnly) { return }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' `
+    -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host "Could not register '$TaskName': $($_.Exception.Message)"
+    Write-Host 'If it was installed from an admin prompt, run this script once as admin.'
+    exit 1
+}
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "Installed and started '$TaskName'. Log: $(Join-Path $PSScriptRoot 'mav-wifi-connector.log')"

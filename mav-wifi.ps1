@@ -8,8 +8,7 @@ for you whenever you are on a MAVSTART network. mav-wifi starts and stops it, sh
 and log, and changes its settings.
 
 Commands:
-  start                   Start the connector now.
-                          -NoConsole  Start it directly in a headless console, with no window at all.
+  start                   Start the connector now, in the background with no window.
   stop                    Stop the connector now. It starts again at the next logon unless autostart is off.
   status                  Show whether the connector is running, and its main settings. Default command.
   log                     Show the last lines of mav-wifi-connector.log.
@@ -37,9 +36,6 @@ With autostart: on or off. With config: the setting name.
 .PARAMETER Value
 With config: the new value for the setting.
 
-.PARAMETER NoConsole
-With start: run the connector directly in a headless console instead of through the scheduled task.
-
 .PARAMETER Lines
 With log: how many lines to show. Defaults to 20.
 
@@ -49,13 +45,8 @@ With log: keep printing new lines until Ctrl+C.
 .EXAMPLE
 mav-wifi start
 
-Starts the connector now through the "MAV WiFi Connector" scheduled task.
-
-.EXAMPLE
-mav-wifi start -NoConsole
-
-Starts the connector directly in a headless console, with no window at all.
-Works without the scheduled task.
+Starts the connector now in the background, with no window. Works even when autostart is off
+or the scheduled task isn't installed.
 
 .EXAMPLE
 mav-wifi stop
@@ -106,7 +97,7 @@ param(
     [ArgumentCompleter({
         param($commandName, $parameterName, $wordToComplete)
         ([ordered]@{
-            start     = 'Start the connector now (add -NoConsole to run it without a console window)'
+            start     = 'Start the connector now, in the background with no window'
             stop      = 'Stop the connector now'
             status    = 'Show whether the connector is running, and its main settings'
             log       = 'Show the log (-Lines <n> for more lines, -Follow to keep watching)'
@@ -143,7 +134,6 @@ param(
         }
     })]
     [string]$Value,
-    [switch]$NoConsole,
     [int]$Lines = 20,
     [switch]$Follow
 )
@@ -199,16 +189,12 @@ function ConvertTo-SettingValue([string]$Name, [string]$Text) {
 
 switch ($Command) {
     'start' {
-        $config = Get-Config
         if (Get-ConnectorProcess) {
             Write-Host 'Already running.'
-        } elseif ($NoConsole -or -not $config.Autostart -or -not (Get-Task)) {
-            Start-Process conhost.exe -ArgumentList '--headless', 'powershell.exe', '-NoProfile',
-                '-ExecutionPolicy', 'Bypass', '-File', "`"$Script`"", '-Manual'
-            Write-Host 'Started with no console window.'
         } else {
-            Start-ScheduledTask -TaskName $TaskName
-            Write-Host "Started '$TaskName'."
+            Start-Process conhost.exe -WindowStyle Hidden -ArgumentList '--headless', 'powershell.exe',
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Script`"", '-Manual'
+            Write-Host 'Started in the background.'
         }
     }
     'stop' {
